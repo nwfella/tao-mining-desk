@@ -1,0 +1,73 @@
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # hourly rebake; minute offset avoids the top-of-hour runner stampede
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write      # rebake commits the fresh artifact back
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebake from chain state
+        run: python scripts/refresh.py
+
+      - name: Stop if the artifact did not change
+        id: diff
+        run: |
+          if git diff --quiet -- index.html data/subnets.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "no data movement — nothing to commit"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit the rebake
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name  "tao-mining-desk[bot]"
+          git config user.email "actions@users.noreply.github.com"
+          git add index.html data/subnets.json
+          git commit -m "data: rebake $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
+
+      - name: Stage the site
+        run: |
+          mkdir -p _site
+          cp index.html _site/index.html
+          mkdir -p _site/data
+          cp data/subnets.json _site/data/subnets.json
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
